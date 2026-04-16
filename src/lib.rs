@@ -22,6 +22,31 @@ pub fn lut_dir() -> PathBuf {
     profiles_dir().join("lut")
 }
 
+/// Full corpus: 363 ICC profiles deduplicated from the zenpixels R2
+/// manifest via normalized FNV-1a hash. Covers RGB/GRAY/CMYK across
+/// the ICC v2/v4 format zoo (real-world profiles from cameras, printers,
+/// operating systems, displays, etc.).
+pub fn corpus_dir() -> PathBuf {
+    profiles_dir().join("corpus")
+}
+
+/// Walk a directory and return all `.icc`/`.icm` file names (sorted).
+pub fn list_corpus(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "icc" || e == "icm") {
+                if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                    names.push(n.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
 /// All matrix-shaper profiles with short labels for display.
 pub fn matrix_profiles() -> Vec<(&'static str, &'static str)> {
     vec![
