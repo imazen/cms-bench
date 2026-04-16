@@ -1,0 +1,12 @@
+[package]
+name = "skcms-sys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "BSD-3-Clause"
+publish = false
+description = "FFI bindings to Google's skcms color management library"
+links = "skcms"
+
+[build-dependencies]
+cc = "1"

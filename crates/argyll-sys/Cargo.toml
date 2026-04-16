@@ -1,0 +1,12 @@
+[package]
+name = "argyll-sys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+description = "FFI bindings to ArgyllCMS icclib for ICC profile transforms"
+links = "argyll_icc"
+
+[build-dependencies]
+cc = "1"
