@@ -3,6 +3,8 @@
 //! Each engine exposes transforms in two configurations:
 //! - **Default**: production settings (what users get out of the box)
 //! - **HQ**: maximum accuracy (float, no optimization, high precision)
+//!
+//! And two rendering intents: Perceptual and Relative Colorimetric.
 
 use std::path::{Path, PathBuf};
 
@@ -112,14 +114,26 @@ pub fn mean_channel_diff(a: &[u16], b: &[u16]) -> f64 {
     sum as f64 / a.len() as f64
 }
 
-// ── Configuration ───────────────────────────────────────────────────────
+// ── Intent + Configuration ──────────────────────────────────────────────
 
-/// Which engine configuration to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    Perceptual,
+    RelativeColorimetric,
+}
+
+impl std::fmt::Display for Intent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Intent::Perceptual => f.write_str("perc"),
+            Intent::RelativeColorimetric => f.write_str("relcol"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Config {
-    /// Production defaults — what users get out of the box.
     Default,
-    /// Maximum accuracy — float math, no optimization shortcuts.
     HighQuality,
 }
 
@@ -134,16 +148,29 @@ impl std::fmt::Display for Config {
 
 // ── moxcms transforms ───────────────────────────────────────────────────
 
-pub fn moxcms_transform_u16(icc_data: &[u8], ramp: &[u16], config: Config) -> Option<Vec<u16>> {
+pub fn moxcms_transform_u16(
+    icc_data: &[u8],
+    ramp: &[u16],
+    config: Config,
+    intent: Intent,
+) -> Option<Vec<u16>> {
     use moxcms::*;
 
     let src = ColorProfile::new_from_slice(icc_data).ok()?;
     let dst = ColorProfile::new_srgb();
 
+    let ri = match intent {
+        Intent::Perceptual => RenderingIntent::Perceptual,
+        Intent::RelativeColorimetric => RenderingIntent::RelativeColorimetric,
+    };
+
     let opts = match config {
-        Config::Default => TransformOptions::default(),
+        Config::Default => TransformOptions {
+            rendering_intent: ri,
+            ..TransformOptions::default()
+        },
         Config::HighQuality => TransformOptions {
-            rendering_intent: RenderingIntent::Perceptual,
+            rendering_intent: ri,
             allow_use_cicp_transfer: false,
             prefer_fixed_point: false,
             interpolation_method: InterpolationMethod::Tetrahedral,
@@ -164,16 +191,25 @@ pub fn moxcms_transform_u8(
     input: &[u8],
     npix: usize,
     config: Config,
+    intent: Intent,
 ) -> Option<Vec<u8>> {
     use moxcms::*;
 
     let src = ColorProfile::new_from_slice(icc_data).ok()?;
     let dst = ColorProfile::new_srgb();
 
+    let ri = match intent {
+        Intent::Perceptual => RenderingIntent::Perceptual,
+        Intent::RelativeColorimetric => RenderingIntent::RelativeColorimetric,
+    };
+
     let opts = match config {
-        Config::Default => TransformOptions::default(),
+        Config::Default => TransformOptions {
+            rendering_intent: ri,
+            ..TransformOptions::default()
+        },
         Config::HighQuality => TransformOptions {
-            rendering_intent: RenderingIntent::Perceptual,
+            rendering_intent: ri,
             allow_use_cicp_transfer: false,
             prefer_fixed_point: false,
             interpolation_method: InterpolationMethod::Tetrahedral,
@@ -191,21 +227,26 @@ pub fn moxcms_transform_u8(
 
 // ── lcms2 transforms ────────────────────────────────────────────────────
 
-pub fn lcms2_transform_u16(icc_data: &[u8], ramp: &[u16], config: Config) -> Option<Vec<u16>> {
-    use lcms2::{Flags, Intent, PixelFormat, Profile, Transform};
+pub fn lcms2_transform_u16(
+    icc_data: &[u8],
+    ramp: &[u16],
+    config: Config,
+    intent: Intent,
+) -> Option<Vec<u16>> {
+    use lcms2::{Flags, Intent as LIntent, PixelFormat, Profile, Transform};
 
     let src = Profile::new_icc(icc_data).ok()?;
     let dst = Profile::new_srgb();
 
+    let li = match intent {
+        Intent::Perceptual => LIntent::Perceptual,
+        Intent::RelativeColorimetric => LIntent::RelativeColorimetric,
+    };
+
     let xform: Transform<[u16; 3], [u16; 3]> = match config {
-        Config::Default => Transform::new(
-            &src,
-            PixelFormat::RGB_16,
-            &dst,
-            PixelFormat::RGB_16,
-            Intent::Perceptual,
-        )
-        .ok()?,
+        Config::Default => {
+            Transform::new(&src, PixelFormat::RGB_16, &dst, PixelFormat::RGB_16, li).ok()?
+        }
         Config::HighQuality => {
             let flags = Flags::NO_OPTIMIZE | Flags::HIGHRES_PRECALC;
             Transform::new_flags(
@@ -213,7 +254,7 @@ pub fn lcms2_transform_u16(icc_data: &[u8], ramp: &[u16], config: Config) -> Opt
                 PixelFormat::RGB_16,
                 &dst,
                 PixelFormat::RGB_16,
-                Intent::Perceptual,
+                li,
                 flags,
             )
             .ok()?
@@ -229,11 +270,16 @@ pub fn lcms2_transform_u16(icc_data: &[u8], ramp: &[u16], config: Config) -> Opt
 
 // ── skcms transforms ────────────────────────────────────────────────────
 
-/// skcms has no quality knobs — same path for both configs.
-pub fn skcms_transform_u16(icc_data: &[u8], ramp: &[u16]) -> Option<Vec<u16>> {
+/// skcms has no quality knobs. Intent is controlled via A2B parse priority.
+pub fn skcms_transform_u16(icc_data: &[u8], ramp: &[u16], intent: Intent) -> Option<Vec<u16>> {
     use skcms_sys::*;
 
-    let profile = parse_icc_profile(icc_data)?;
+    let priority: &[i32] = match intent {
+        Intent::Perceptual => &[0, 1],
+        Intent::RelativeColorimetric => &[1, 0],
+    };
+
+    let profile = parse_icc_profile_with_priority(icc_data, priority)?;
     let srgb = srgb_profile();
     let npix = ramp.len() / 3;
     let mut out = vec![0u16; ramp.len()];
@@ -255,16 +301,13 @@ pub fn skcms_transform_u16(icc_data: &[u8], ramp: &[u16]) -> Option<Vec<u16>> {
 // ── ArgyllCMS transforms ────────────────────────────────────────────────
 
 /// ArgyllCMS has no quality knobs. V2 profiles only.
-pub fn argyll_transform_u16(icc_data: &[u8], ramp: &[u16]) -> Option<Vec<u16>> {
+pub fn argyll_transform_u16(icc_data: &[u8], ramp: &[u16], intent: Intent) -> Option<Vec<u16>> {
+    let ai = match intent {
+        Intent::Perceptual => argyll_sys::Intent::Perceptual,
+        Intent::RelativeColorimetric => argyll_sys::Intent::RelativeColorimetric,
+    };
     let npix = ramp.len() / 3;
     let mut out = vec![0u16; ramp.len()];
-    let ok = argyll_sys::transform_u16(
-        icc_data,
-        argyll_sys::SRGB_ICC,
-        argyll_sys::Intent::Perceptual,
-        ramp,
-        &mut out,
-        npix,
-    );
+    let ok = argyll_sys::transform_u16(icc_data, argyll_sys::SRGB_ICC, ai, ramp, &mut out, npix);
     if ok { Some(out) } else { None }
 }
