@@ -94,7 +94,7 @@ pub fn make_ramp_u16() -> Vec<u16> {
 
 // ── Diff helpers ────────────────────────────────────────────────────────
 
-pub fn max_channel_diff(a: &[u16], b: &[u16]) -> u32 {
+pub fn max_diff_u16(a: &[u16], b: &[u16]) -> u32 {
     a.iter()
         .zip(b)
         .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs())
@@ -102,7 +102,7 @@ pub fn max_channel_diff(a: &[u16], b: &[u16]) -> u32 {
         .unwrap_or(0)
 }
 
-pub fn mean_channel_diff(a: &[u16], b: &[u16]) -> f64 {
+pub fn mean_diff_u16(a: &[u16], b: &[u16]) -> f64 {
     if a.is_empty() {
         return 0.0;
     }
@@ -112,6 +112,34 @@ pub fn mean_channel_diff(a: &[u16], b: &[u16]) -> f64 {
         .map(|(&x, &y)| (x as i64 - y as i64).unsigned_abs())
         .sum();
     sum as f64 / a.len() as f64
+}
+
+pub fn max_diff_u8(a: &[u8], b: &[u8]) -> u32 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs())
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn mean_diff_u8(a: &[u8], b: &[u8]) -> f64 {
+    if a.is_empty() {
+        return 0.0;
+    }
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i64 - y as i64).unsigned_abs())
+        .sum();
+    sum as f64 / a.len() as f64
+}
+
+// Keep old names as aliases
+pub fn max_channel_diff(a: &[u16], b: &[u16]) -> u32 {
+    max_diff_u16(a, b)
+}
+pub fn mean_channel_diff(a: &[u16], b: &[u16]) -> f64 {
+    mean_diff_u16(a, b)
 }
 
 // ── Intent + Configuration ──────────────────────────────────────────────
@@ -309,5 +337,77 @@ pub fn argyll_transform_u16(icc_data: &[u8], ramp: &[u16], intent: Intent) -> Op
     let npix = ramp.len() / 3;
     let mut out = vec![0u16; ramp.len()];
     let ok = argyll_sys::transform_u16(icc_data, argyll_sys::SRGB_ICC, ai, ramp, &mut out, npix);
+    if ok { Some(out) } else { None }
+}
+
+// ── u8 wrappers (for 8-bit accuracy comparison) ─────────────────────────
+
+pub fn lcms2_transform_u8(
+    icc_data: &[u8],
+    input: &[u8],
+    npix: usize,
+    config: Config,
+    intent: Intent,
+) -> Option<Vec<u8>> {
+    use lcms2::{Flags, Intent as LIntent, PixelFormat, Profile, Transform};
+
+    let src = Profile::new_icc(icc_data).ok()?;
+    let dst = Profile::new_srgb();
+    let li = match intent {
+        Intent::Perceptual => LIntent::Perceptual,
+        Intent::RelativeColorimetric => LIntent::RelativeColorimetric,
+    };
+
+    let xform: Transform<u8, u8> = match config {
+        Config::Default => {
+            Transform::new(&src, PixelFormat::RGB_8, &dst, PixelFormat::RGB_8, li).ok()?
+        }
+        Config::HighQuality => {
+            let flags = Flags::NO_OPTIMIZE | Flags::HIGHRES_PRECALC;
+            Transform::new_flags(
+                &src,
+                PixelFormat::RGB_8,
+                &dst,
+                PixelFormat::RGB_8,
+                li,
+                flags,
+            )
+            .ok()?
+        }
+    };
+
+    let mut out = vec![0u8; npix * 3];
+    xform.transform_pixels(input, &mut out);
+    Some(out)
+}
+
+pub fn skcms_transform_u8(
+    icc_data: &[u8],
+    input: &[u8],
+    npix: usize,
+    intent: Intent,
+) -> Option<Vec<u8>> {
+    use skcms_sys::*;
+
+    let priority: &[i32] = match intent {
+        Intent::Perceptual => &[0, 1],
+        Intent::RelativeColorimetric => &[1, 0],
+    };
+
+    let profile = parse_icc_profile_with_priority(icc_data, priority)?;
+    let srgb = srgb_profile();
+    let mut out = vec![0u8; npix * 3];
+
+    let ok = transform(
+        input,
+        skcms_PixelFormat::RGB_888,
+        skcms_AlphaFormat::Opaque,
+        &profile,
+        &mut out,
+        skcms_PixelFormat::RGB_888,
+        skcms_AlphaFormat::Opaque,
+        srgb,
+        npix,
+    );
     if ok { Some(out) } else { None }
 }
